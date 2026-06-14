@@ -11,8 +11,14 @@ Run from the project root:
 
 import pytest
 
-from tools import ToolError, create_fit_card, search_listings, suggest_outfit
-from utils.data_loader import get_empty_wardrobe
+from tools import (
+    ToolError,
+    create_fit_card,
+    search_listings,
+    suggest_outfit,
+    update_style_profile,
+)
+from utils.data_loader import get_empty_wardrobe, get_example_wardrobe
 
 
 # ── search_listings ───────────────────────────────────────────────────────────
@@ -263,3 +269,82 @@ class TestCreateFitCard:
 
         with pytest.raises(ToolError, match="empty response"):
             create_fit_card(self.OUTFIT, self.NEW_ITEM)
+
+
+# ── update_style_profile ──────────────────────────────────────────────────────
+
+class TestUpdateStyleProfile:
+    NEW_ITEM = {
+        "id": "lst_033",
+        "title": "Vintage Band Tee — Faded Grey",
+        "category": "tops",
+        "style_tags": ["vintage", "grunge", "band tee"],
+        "size": "L",
+        "condition": "fair",
+        "price": 19.00,
+        "colors": ["grey", "charcoal"],
+        "brand": None,
+        "platform": "depop",
+    }
+
+    def test_appends_item_to_empty_wardrobe(self):
+        wardrobe = get_empty_wardrobe()
+        updated = update_style_profile(self.NEW_ITEM, wardrobe)
+        assert len(updated["items"]) == 1
+        item = updated["items"][0]
+        assert item["id"] == "w_001"
+        assert item["name"] == "Vintage Band Tee — Faded Grey"
+        assert item["category"] == "tops"
+        assert item["colors"] == ["grey", "charcoal"]
+        assert item["style_tags"] == ["vintage", "grunge", "band tee"]
+        # notes synthesized from size/condition/platform/price
+        assert "Size: L" in item["notes"]
+        assert "depop" in item["notes"]
+        assert "$19.00" in item["notes"]
+
+    def test_preserves_existing_items_and_picks_next_id(self):
+        wardrobe = get_example_wardrobe()
+        starting_count = len(wardrobe["items"])
+        existing_ids = [it["id"] for it in wardrobe["items"]]
+
+        updated = update_style_profile(self.NEW_ITEM, wardrobe)
+
+        assert len(updated["items"]) == starting_count + 1
+        # All previously-present ids are still there
+        for old_id in existing_ids:
+            assert any(it["id"] == old_id for it in updated["items"])
+        # The new id doesn't collide
+        new_id = updated["items"][-1]["id"]
+        assert new_id not in existing_ids
+        # And it's one above the highest existing w_NNN
+        max_existing = max(int(i.split("_")[1]) for i in existing_ids if i.startswith("w_"))
+        assert new_id == f"w_{max_existing + 1:03d}"
+
+    def test_does_not_mutate_input_wardrobe(self):
+        """Pure function — caller's wardrobe must be untouched so Gradio's
+        BrowserState can compare old vs new values cleanly."""
+        wardrobe = get_example_wardrobe()
+        before_len = len(wardrobe["items"])
+        before_first_id = wardrobe["items"][0]["id"]
+
+        update_style_profile(self.NEW_ITEM, wardrobe)
+
+        assert len(wardrobe["items"]) == before_len
+        assert wardrobe["items"][0]["id"] == before_first_id
+
+    def test_handles_missing_optional_fields(self):
+        """Listings sometimes have brand=None or no description — only
+        `title` is required; everything else falls back to sensible defaults."""
+        skinny_item = {"title": "Mystery Jacket", "category": "outerwear"}
+        updated = update_style_profile(skinny_item, get_empty_wardrobe())
+        item = updated["items"][0]
+        assert item["name"] == "Mystery Jacket"
+        assert item["category"] == "outerwear"
+        assert item["colors"] == []
+        assert item["style_tags"] == []
+        assert item["notes"] is None  # nothing to synthesize from
+
+    # ── FAILURE MODE: new_item missing required `title` (raises) ─────────────
+    def test_missing_title_raises_tool_error(self):
+        with pytest.raises(ToolError, match="missing required field 'title'"):
+            update_style_profile({"category": "tops"}, get_empty_wardrobe())

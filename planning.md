@@ -127,8 +127,9 @@ If `new_item` is missing required fields or the LLM fails, the tool raises `Tool
 
 **What it does:**
 <!-- Describe what this tool does in 1–2 sentences -->
-This tool adds a new thrift item to the wardrobe stored in the current user's browser local storage. If the current user has no existing wardrobe, it creates one following the schema defined in ./data/wardrobe_schema.json and add the item to that.
-The item must be formatted as described in the wardrobe_schema. For example:
+This tool appends a thrifted listing to the user's wardrobe and returns the updated wardrobe dict. It is a **pure function** — it does NOT touch storage. The Gradio handler is responsible for persisting the returned dict to the browser's localStorage via `gr.BrowserState`.
+
+The tool maps a listing dict to a wardrobe-item dict (per the schema in `./data/wardrobe_schema.json`), generating a fresh `w_XXX` id and synthesizing the `notes` field from the listing's brand/size/condition/platform/price. For example:
 ```
       {
         "id": "w_008",
@@ -136,13 +137,14 @@ The item must be formatted as described in the wardrobe_schema. For example:
         "category": "shoes",
         "colors": ["black"],
         "style_tags": ["boots", "grunge", "classic"],
-        "notes": "Lace-up, mid-ankle height"
+        "notes": "Size: 8; Condition: good; From: depop; Price: $34.00"
       }
 ```
 
 **Input parameters:**
 <!-- List each parameter, its type, and what it represents -->
-- `new_item` (dict): details of a listing item that the user is considering thrifting
+- `new_item` (dict): details of a listing item the user wants to keep
+- `wardrobe` (dict): the current wardrobe dict; not mutated
 
 **What it returns:**
 <!-- Describe the return value -->

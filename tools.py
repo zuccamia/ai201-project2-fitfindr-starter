@@ -397,3 +397,78 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     caption = caption.strip()
     logger.info("create_fit_card: returning %d chars", len(caption))
     return caption
+
+
+# ── Tool 4: update_style_profile ──────────────────────────────────────────────
+
+def update_style_profile(new_item: dict, wardrobe: dict) -> dict:
+    """
+    Append a thrifted listing to the user's wardrobe and return the updated
+    wardrobe dict. Pure function — does NOT touch storage. The caller (the
+    Gradio handler) is responsible for persisting the returned dict to the
+    browser's localStorage via gr.BrowserState.
+
+    Args:
+        new_item: The listing dict the user wants to keep. Must have at
+                  least `title`; other fields are best-effort.
+        wardrobe: The current wardrobe dict with an `items` list. The input
+                  is NOT mutated — a new dict is returned.
+
+    Returns:
+        A new wardrobe dict with one extra item appended to `items`. The
+        added item follows the schema in data/wardrobe_schema.json:
+        {id, name, category, colors, style_tags, notes}.
+
+    Raises:
+        ToolError: if `new_item` is missing a `title` (required for `name`)
+                   or if the wardrobe shape is otherwise unusable.
+    """
+    title = new_item.get("title")
+    if not title:
+        logger.error("update_style_profile: new_item missing required field 'title'")
+        raise ToolError("update_style_profile: new_item missing required field 'title'")
+
+    items = list(wardrobe.get("items", []))
+    next_id = _next_wardrobe_id(items)
+    wardrobe_item = {
+        "id": next_id,
+        "name": title,
+        "category": new_item.get("category", "uncategorized"),
+        "colors": list(new_item.get("colors", [])),
+        "style_tags": list(new_item.get("style_tags", [])),
+        "notes": _build_wardrobe_item_notes(new_item),
+    }
+    items.append(wardrobe_item)
+
+    logger.info(
+        "update_style_profile: added %s (%s) to wardrobe — now %d item(s)",
+        next_id, title, len(items),
+    )
+
+    return {**wardrobe, "items": items}
+
+
+def _next_wardrobe_id(items: list[dict]) -> str:
+    """Pick the next w_XXX id by scanning existing items for the highest number."""
+    highest = 0
+    for it in items:
+        match = re.match(r"^w_(\d+)$", it.get("id", ""))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"w_{highest + 1:03d}"
+
+
+def _build_wardrobe_item_notes(new_item: dict) -> str | None:
+    """Synthesize a notes string from the listing's brand/size/condition/etc."""
+    parts = []
+    if new_item.get("brand"):
+        parts.append(f"Brand: {new_item['brand']}")
+    if new_item.get("size"):
+        parts.append(f"Size: {new_item['size']}")
+    if new_item.get("condition"):
+        parts.append(f"Condition: {new_item['condition']}")
+    if new_item.get("platform"):
+        parts.append(f"From: {new_item['platform']}")
+    if new_item.get("price") is not None:
+        parts.append(f"Price: ${new_item['price']:.2f}")
+    return "; ".join(parts) if parts else None
