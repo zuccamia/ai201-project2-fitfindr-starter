@@ -223,11 +223,17 @@ class TestCreateFitCard:
 
         assert captured.get("temperature", 0) >= 0.8
 
-    # ── FAILURE MODE: outfit is empty/whitespace (raises) ────────────────────
+    # ── FAILURE MODE: outfit is empty/whitespace (graceful — NOT a raise) ────
+    # The fit card is non-critical, so empty outfit returns a placeholder
+    # string instead of failing the whole interaction. The agent still
+    # stores it in session['fit_card'] so the user sees it in the UI.
     @pytest.mark.parametrize("bad_outfit", ["", "   ", "\n\t"])
-    def test_empty_outfit_raises_tool_error(self, bad_outfit):
-        with pytest.raises(ToolError, match="non-empty outfit"):
-            create_fit_card(bad_outfit, self.NEW_ITEM)
+    def test_empty_outfit_returns_placeholder_string(self, bad_outfit):
+        result = create_fit_card(bad_outfit, self.NEW_ITEM)
+        assert isinstance(result, str)
+        assert result.strip(), "expected a non-empty placeholder string"
+        assert "outfit" in result.lower() or "empty" in result.lower(), \
+            f"placeholder should describe what went wrong, got: {result!r}"
 
     # ── FAILURE MODE: required new_item field missing (raises) ───────────────
     @pytest.mark.parametrize("missing", ["title", "price", "platform"])

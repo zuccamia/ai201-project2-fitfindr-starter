@@ -308,12 +308,14 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Returns:
         A 2–4 sentence string usable as an Instagram/TikTok caption.
+        If `outfit` is empty/whitespace, returns a short placeholder string
+        explaining why — the fit card is not critical, so we degrade
+        gracefully rather than failing the whole interaction.
 
     Raises:
-        ToolError: if `outfit` is empty/whitespace-only, if `new_item` is
-                   missing required fields, or if the LLM call fails. The
-                   agent loop catches this and writes the message to
-                   session['error'].
+        ToolError: if `new_item` is missing required fields or if the LLM
+                   call fails. The agent loop catches this and writes the
+                   message to session['error'].
 
     The caption should:
     - Feel casual and authentic (like a real OOTD post, not a product description)
@@ -322,8 +324,8 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     - Sound different each time for different inputs (use higher LLM temperature)
 
     TODO:
-        1. Guard against an empty or whitespace-only outfit string —
-           raise ToolError rather than calling the LLM with bad input.
+        1. Guard against an empty or whitespace-only outfit string — return
+           a placeholder string explaining the fit card couldn't be made.
         2. Build a prompt that gives the LLM the item details and the outfit,
            and asks for a caption matching the style guidelines above.
         3. Call the LLM and return the response string.
@@ -334,8 +336,11 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     Before writing code, fill in the Tool 3 section of planning.md.
     """
     if not outfit or not outfit.strip():
-        logger.error("create_fit_card: outfit is empty/whitespace")
-        raise ToolError("create_fit_card requires a non-empty outfit string")
+        # The fit card is not critical to the user's experience — degrade
+        # gracefully so the listing + outfit panels still render. The
+        # placeholder still tells the user *why* there's no caption.
+        logger.warning("create_fit_card: outfit empty — returning placeholder")
+        return "⚠️ Couldn't generate a fit card — the outfit description was empty."
 
     title = new_item.get("title")
     price = new_item.get("price")

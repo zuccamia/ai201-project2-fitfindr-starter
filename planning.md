@@ -118,7 +118,8 @@ A non-empty string of a shareable outfit description.
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the outfit data is incomplete? -->
 If `outfit` is non-empty but generic (e.g., general styling advice from the empty-wardrobe branch of `suggest_outfit`), the fit card content is allowed to be more generic — this is NOT an error.
-If `outfit` is empty/whitespace, `new_item` is missing required fields, or the LLM fails, the tool raises `ToolError`. The agent catches this and writes the message to `session['error']`.
+If `outfit` is empty/whitespace, the fit card is not critical so the tool returns a placeholder descriptive string (e.g., `"⚠️ Couldn't generate a fit card — the outfit description was empty."`) rather than raising. The agent stores it in `session['fit_card']` and the user sees the message in the fit-card panel.
+If `new_item` is missing required fields or the LLM fails, the tool raises `ToolError`. The agent catches this and writes the message to `session['error']`.
 
 ---
 
@@ -239,7 +240,8 @@ All tools raise `ToolError` on unrecoverable failure. The agent loop wraps each 
 | search_listings | Dataset cannot be loaded (raises `ToolError`) | Catch, write message to `session['error']`, return early |
 | suggest_outfit | Wardrobe is empty (NOT a ToolError — tool falls back to general advice) | None — proceed with the returned string |
 | suggest_outfit | LLM call fails (raises `ToolError`) | Catch, write message to `session['error']`, return early — skip `create_fit_card` and `update_style_profile` |
-| create_fit_card | Outfit is empty/whitespace, `new_item` malformed, or LLM fails (raises `ToolError`) | Catch, write message to `session['error']`, return early |
+| create_fit_card | Outfit is empty/whitespace (NOT a ToolError — fit card is non-critical) | Tool returns a placeholder string; agent stores it in `session['fit_card']` and proceeds — no early return |
+| create_fit_card | `new_item` malformed or LLM fails (raises `ToolError`) | Catch, write message to `session['error']`, return early |
 | update_style_profile | localStorage write fails or `new_item` malformed (raises `ToolError`) | Catch, write message to `session['error']`, return the session anyway (the recommendation is already shown to the user) |
 
 ---
@@ -291,8 +293,10 @@ All tools raise `ToolError` on unrecoverable failure. The agent loop wraps each 
 │            ║  TOOL: create_fit_card(outfit_suggestion, selected_item) ║         │
 │            ╚══════════════════════════════════════════════════════════╝         │
 │       except ToolError as e:                                                    │
-│          │  str returned → Session: session['fit_card'] = "..."                 │
-│          │  ToolError    → Session: session['error']=str(e), RETURN EARLY       │
+│          │  str returned (incl. placeholder on empty outfit, NOT a raise)       │
+│          │                 → Session: session['fit_card'] = "..."               │
+│          │  ToolError (malformed item / LLM failure)                            │
+│          │                 → Session: session['error']=str(e), RETURN EARLY     │
 │          ▼                                                                      │
 │   (7) answer user with: selected_item + outfit_suggestion + fit_card            │
 │          │                                                                      │
