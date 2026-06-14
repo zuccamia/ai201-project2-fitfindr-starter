@@ -20,6 +20,7 @@ Usage (once implemented):
 
 import json
 import logging
+import pprint
 
 from tools import (
     ToolError,
@@ -107,82 +108,108 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     logger.info("=== run_agent start: query=%r wardrobe_items=%d ===",
                 query, len(wardrobe.get("items", []) if isinstance(wardrobe, dict) else []))
 
-    # Step 2: parse the natural-language query into structured search params.
-    logger.info("Step 2: parse query")
     try:
-        session["parsed"] = _parse_query(query)
-    except ToolError as e:
-        session["error"] = f"Failed to parse user's request: {e}"
-        logger.error("Step 2 failed: %s", session["error"])
-        return session
-    logger.info("Step 2: parsed=%s", session["parsed"])
+        # Step 2: parse the natural-language query into structured search params.
+        logger.info("Step 2: parse query")
+        try:
+            session["parsed"] = _parse_query(query)
+        except ToolError as e:
+            session["error"] = f"Failed to parse user's request: {e}"
+            logger.error("Step 2 failed: %s", session["error"])
+            return session
+        logger.info("Step 2: parsed=%s", session["parsed"])
 
-    parsed = session["parsed"]
+        parsed = session["parsed"]
 
-    # Step 3: search for matching listings. Retry once without the size
-    # filter if the first call returns empty (per planning.md).
-    logger.info("Step 3: search_listings")
-    try:
-        results = search_listings(
-            description=parsed["description"],
-            size=parsed.get("size"),
-            max_price=parsed.get("max_price"),
-        )
-        if not results and parsed.get("size"):
-            logger.warning("Step 3: 0 results — retrying without size filter")
+        # Step 3: search for matching listings. Retry once without the size
+        # filter if the first call returns empty (per planning.md).
+        logger.info("Step 3: search_listings")
+        try:
             results = search_listings(
                 description=parsed["description"],
-                size=None,
+                size=parsed.get("size"),
                 max_price=parsed.get("max_price"),
             )
-    except ToolError as e:
-        session["error"] = str(e)
-        logger.error("Step 3 failed: %s", e)
+            if not results and parsed.get("size"):
+                logger.warning("Step 3: 0 results — retrying without size filter")
+                results = search_listings(
+                    description=parsed["description"],
+                    size=None,
+                    max_price=parsed.get("max_price"),
+                )
+        except ToolError as e:
+            session["error"] = str(e)
+            logger.error("Step 3 failed: %s", e)
+            return session
+
+        session["search_results"] = results
+
+        if not results:
+            constraints = [f"'{parsed['description']}'"]
+            if parsed.get("size"):
+                constraints.append(f"size {parsed['size']}")
+            if parsed.get("max_price"):
+                constraints.append(f"under ${parsed['max_price']:.0f}")
+            session["error"] = (
+                f"No listings found matching {', '.join(constraints)}. "
+                "Try a different query or remove some constraints."
+            )
+            logger.error("Step 3 failed: %s", session["error"])
+            return session
+
+        # Step 4: pick the top result.
+        session["selected_item"] = results[0]
+        logger.info("Step 4: selected_item id=%s title=%r",
+                    results[0]["id"], results[0]["title"])
+
+        # Step 5: ask the LLM for an outfit using the new item + wardrobe.
+        logger.info("Step 5: suggest_outfit")
+        try:
+            session["outfit_suggestion"] = suggest_outfit(session["selected_item"], wardrobe)
+        except ToolError as e:
+            session["error"] = str(e)
+            logger.error("Step 5 failed: %s", e)
+            return session
+
+        # Step 6: turn the suggestion into a shareable caption.
+        logger.info("Step 6: create_fit_card")
+        try:
+            session["fit_card"] = create_fit_card(
+                session["outfit_suggestion"],
+                session["selected_item"],
+            )
+        except ToolError as e:
+            session["error"] = str(e)
+            logger.error("Step 6 failed: %s", e)
+            return session
+
         return session
+    finally:
+        logger.info("=== run_agent end: %s ===", _summarize_session(session))
+        if logger.isEnabledFor(logging.DEBUG):
+            # Dump the full session (minus the wardrobe, which is bulky and
+            # already known from the start-of-run log).
+            dump = {k: v for k, v in session.items() if k != "wardrobe"}
+            logger.debug("session dump:\n%s", pprint.pformat(dump, width=120, sort_dicts=False))
 
-    session["search_results"] = results
 
-    if not results:
-        constraints = [f"'{parsed['description']}'"]
-        if parsed.get("size"):
-            constraints.append(f"size {parsed['size']}")
-        if parsed.get("max_price"):
-            constraints.append(f"under ${parsed['max_price']:.0f}")
-        session["error"] = (
-            f"No listings found matching {', '.join(constraints)}. "
-            "Try a different query or remove some constraints."
-        )
-        logger.error("Step 3 failed: %s", session["error"])
-        return session
-
-    # Step 4: pick the top result.
-    session["selected_item"] = results[0]
-    logger.info("Step 4: selected_item id=%s title=%r",
-                results[0]["id"], results[0]["title"])
-
-    # Step 5: ask the LLM for an outfit using the new item + wardrobe.
-    logger.info("Step 5: suggest_outfit")
-    try:
-        session["outfit_suggestion"] = suggest_outfit(session["selected_item"], wardrobe)
-    except ToolError as e:
-        session["error"] = str(e)
-        logger.error("Step 5 failed: %s", e)
-        return session
-
-    # Step 6: turn the suggestion into a shareable caption.
-    logger.info("Step 6: create_fit_card")
-    try:
-        session["fit_card"] = create_fit_card(
-            session["outfit_suggestion"],
-            session["selected_item"],
-        )
-    except ToolError as e:
-        session["error"] = str(e)
-        logger.error("Step 6 failed: %s", e)
-        return session
-
-    logger.info("=== run_agent complete (success) ===")
-    return session
+def _summarize_session(session: dict) -> str:
+    """Compact one-liner for the end-of-run INFO log."""
+    parts = []
+    if session.get("error"):
+        parts.append(f"error={session['error']!r}")
+    if session.get("parsed"):
+        parts.append(f"parsed={session['parsed']}")
+    sr = session.get("search_results")
+    if sr:
+        parts.append(f"search_results={len(sr)} item(s)")
+    if session.get("selected_item"):
+        parts.append(f"selected_item={session['selected_item']['id']!r}")
+    if session.get("outfit_suggestion"):
+        parts.append(f"outfit_suggestion={len(session['outfit_suggestion'])} chars")
+    if session.get("fit_card"):
+        parts.append(f"fit_card={len(session['fit_card'])} chars")
+    return " | ".join(parts) if parts else "(empty session)"
 
 
 # ── step 2 helper: query parsing ──────────────────────────────────────────────
