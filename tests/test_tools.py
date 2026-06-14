@@ -187,16 +187,73 @@ def _make_fake_client(captured: dict, reply: str):
 # ── create_fit_card ───────────────────────────────────────────────────────────
 
 class TestCreateFitCard:
-    # ── FAILURE MODE: outfit input is missing or incomplete (raises) ─────────
-    @pytest.mark.skip(reason="create_fit_card is still a stub")
-    def test_empty_outfit_raises_tool_error(self):
-        """Per planning.md: empty outfit raises ToolError so the agent loop
-        can catch it and write the message to session['error']."""
-        new_item = {
-            "id": "lst_002",
-            "title": "Y2K Baby Tee",
-            "price": 18.0,
-            "platform": "depop",
-        }
-        with pytest.raises(ToolError):
-            create_fit_card("", new_item)
+    """The Groq client is monkeypatched in every test so nothing hits the network."""
+
+    NEW_ITEM = {
+        "id": "lst_002",
+        "title": "Y2K Baby Tee — Butterfly Print",
+        "price": 18.0,
+        "platform": "depop",
+    }
+    OUTFIT = (
+        "Pair with your Baggy straight-leg jeans and Chunky white sneakers "
+        "for a casual streetwear look."
+    )
+
+    def test_prompt_includes_item_name_price_and_platform(self, monkeypatch):
+        """The LLM needs all three so the caption can mention them naturally
+        (once each, per the spec)."""
+        captured = {}
+        monkeypatch.setattr("tools._get_groq_client", _make_fake_client(captured, reply="ok"))
+
+        create_fit_card(self.OUTFIT, self.NEW_ITEM)
+
+        user_prompt = captured["messages"][-1]["content"]
+        assert "Y2K Baby Tee" in user_prompt
+        assert "18.00" in user_prompt
+        assert "depop" in user_prompt
+
+    def test_uses_high_temperature_for_caption_variety(self, monkeypatch):
+        """Captions should sound different each invocation — temperature must
+        be elevated above the suggest_outfit default."""
+        captured = {}
+        monkeypatch.setattr("tools._get_groq_client", _make_fake_client(captured, reply="ok"))
+
+        create_fit_card(self.OUTFIT, self.NEW_ITEM)
+
+        assert captured.get("temperature", 0) >= 0.8
+
+    # ── FAILURE MODE: outfit is empty/whitespace (raises) ────────────────────
+    @pytest.mark.parametrize("bad_outfit", ["", "   ", "\n\t"])
+    def test_empty_outfit_raises_tool_error(self, bad_outfit):
+        with pytest.raises(ToolError, match="non-empty outfit"):
+            create_fit_card(bad_outfit, self.NEW_ITEM)
+
+    # ── FAILURE MODE: required new_item field missing (raises) ───────────────
+    @pytest.mark.parametrize("missing", ["title", "price", "platform"])
+    def test_missing_required_field_raises_tool_error(self, missing):
+        item = dict(self.NEW_ITEM)
+        del item[missing]
+        with pytest.raises(ToolError, match=f"missing required field.*{missing}"):
+            create_fit_card(self.OUTFIT, item)
+
+    # ── FAILURE MODE: LLM call fails (raises ToolError) ──────────────────────
+    def test_llm_failure_raises_tool_error(self, monkeypatch):
+        class _BrokenClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**_):
+                        raise RuntimeError("API down")
+
+        monkeypatch.setattr("tools._get_groq_client", lambda: _BrokenClient())
+
+        with pytest.raises(ToolError, match="create_fit_card LLM call failed"):
+            create_fit_card(self.OUTFIT, self.NEW_ITEM)
+
+    def test_empty_llm_response_raises_tool_error(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("tools._get_groq_client", _make_fake_client(captured, reply="   "))
+
+        with pytest.raises(ToolError, match="empty response"):
+            create_fit_card(self.OUTFIT, self.NEW_ITEM)

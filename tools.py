@@ -301,5 +301,54 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        raise ToolError("create_fit_card requires a non-empty outfit string")
+
+    title = new_item.get("title")
+    price = new_item.get("price")
+    platform = new_item.get("platform")
+
+    missing = [k for k, v in [("title", title), ("price", price), ("platform", platform)] if not v]
+    if missing:
+        raise ToolError(
+            f"create_fit_card new_item missing required field(s): {', '.join(missing)}"
+        )
+
+    user_prompt = (
+        "Write a casual 2–4 sentence Instagram/TikTok caption for a thrifted find.\n\n"
+        f"Item: {title}\n"
+        f"Price: ${price:.2f}\n"
+        f"Platform: {platform}\n"
+        f"Outfit notes: {outfit.strip()}\n\n"
+        "Voice rules:\n"
+        "- Sound like a real OOTD post, not a product description.\n"
+        "- Mention the item name, price, and platform naturally (once each).\n"
+        "- Capture the outfit's specific vibe — don't be generic.\n"
+        "- Lowercase first-person is fine. Emoji optional, at most one.\n"
+        "- No hashtags, no preamble — just the caption."
+    )
+
+    try:
+        client = _get_groq_client()
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You write short, casual, authentic-sounding OOTD "
+                        "captions for thrifted finds."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+        )
+        caption = resp.choices[0].message.content
+    except Exception as e:
+        raise ToolError(f"create_fit_card LLM call failed: {e}") from e
+
+    if not caption or not caption.strip():
+        raise ToolError("create_fit_card LLM returned an empty response")
+
+    return caption.strip()
