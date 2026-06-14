@@ -17,6 +17,7 @@ exception message to session['error'] before returning early. An empty
 successful result (e.g., search_listings returning []) is NOT an error.
 """
 
+import logging
 import os
 import re
 
@@ -24,6 +25,8 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from utils.data_loader import load_listings
+
+logger = logging.getLogger(__name__)
 
 
 class ToolError(Exception):
@@ -96,19 +99,30 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
+    logger.info(
+        "search_listings: description=%r size=%r max_price=%r",
+        description, size, max_price,
+    )
     try:
         listings = load_listings()
     except (FileNotFoundError, ValueError) as e:
+        logger.error("search_listings: dataset load failed: %s", e)
         raise ToolError(f"Failed to load listings dataset: {e}") from e
+
+    total = len(listings)
 
     if max_price is not None:
         listings = [l for l in listings if l["price"] <= max_price]
-
     if size:
         listings = [l for l in listings if _size_matches(size, l["size"])]
+    logger.debug(
+        "search_listings: %d/%d listings after price+size filters",
+        len(listings), total,
+    )
 
     query_tokens = _tokenize(description)
     if not query_tokens:
+        logger.warning("search_listings: description tokenized to empty set; returning []")
         return []
 
     scored = []
@@ -125,7 +139,16 @@ def search_listings(
             scored.append((score, listing))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [listing for _, listing in scored[:3]]
+    results = [listing for _, listing in scored[:3]]
+    logger.info(
+        "search_listings: returning %d result(s)%s",
+        len(results),
+        " (top score=%d)" % scored[0][0] if scored else "",
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        for score, listing in scored[:3]:
+            logger.debug("  · score=%d id=%s title=%r", score, listing["id"], listing["title"])
+    return results
 
 
 def _tokenize(text: str) -> set[str]:
@@ -181,6 +204,10 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     """
     items = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
     item_summary = _format_new_item(new_item)
+    logger.info(
+        "suggest_outfit: item=%r wardrobe_items=%d",
+        new_item.get("title", "?"), len(items),
+    )
 
     if items:
         wardrobe_summary = _format_wardrobe_items(items)
@@ -204,6 +231,7 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
             "Keep the whole reply under 120 words. No preamble, no bullet markers."
         )
 
+    logger.debug("suggest_outfit: prompt %d chars", len(user_prompt))
     try:
         client = _get_groq_client()
         resp = client.chat.completions.create(
@@ -223,12 +251,16 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         )
         suggestion = resp.choices[0].message.content
     except Exception as e:
+        logger.error("suggest_outfit: LLM call failed: %s", e)
         raise ToolError(f"suggest_outfit LLM call failed: {e}") from e
 
     if not suggestion or not suggestion.strip():
+        logger.error("suggest_outfit: LLM returned empty response")
         raise ToolError("suggest_outfit LLM returned an empty response")
 
-    return suggestion.strip()
+    suggestion = suggestion.strip()
+    logger.info("suggest_outfit: returning %d chars", len(suggestion))
+    return suggestion
 
 
 def _format_new_item(item: dict) -> str:
@@ -302,6 +334,7 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     Before writing code, fill in the Tool 3 section of planning.md.
     """
     if not outfit or not outfit.strip():
+        logger.error("create_fit_card: outfit is empty/whitespace")
         raise ToolError("create_fit_card requires a non-empty outfit string")
 
     title = new_item.get("title")
@@ -310,9 +343,12 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     missing = [k for k, v in [("title", title), ("price", price), ("platform", platform)] if not v]
     if missing:
+        logger.error("create_fit_card: new_item missing field(s): %s", missing)
         raise ToolError(
             f"create_fit_card new_item missing required field(s): {', '.join(missing)}"
         )
+
+    logger.info("create_fit_card: item=%r outfit=%d chars", title, len(outfit))
 
     user_prompt = (
         "Write a casual 2–4 sentence Instagram/TikTok caption for a thrifted find.\n\n"
@@ -346,9 +382,13 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         )
         caption = resp.choices[0].message.content
     except Exception as e:
+        logger.error("create_fit_card: LLM call failed: %s", e)
         raise ToolError(f"create_fit_card LLM call failed: {e}") from e
 
     if not caption or not caption.strip():
+        logger.error("create_fit_card: LLM returned empty response")
         raise ToolError("create_fit_card LLM returned an empty response")
 
-    return caption.strip()
+    caption = caption.strip()
+    logger.info("create_fit_card: returning %d chars", len(caption))
+    return caption

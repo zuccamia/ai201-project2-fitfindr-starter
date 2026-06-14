@@ -12,10 +12,29 @@ Then open the localhost URL shown in your terminal (usually http://localhost:786
 but check your terminal — the port may differ).
 """
 
+import logging
+import os
+
 import gradio as gr
 
 from agent import run_agent
 from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
+
+logger = logging.getLogger(__name__)
+
+
+def _setup_logging() -> None:
+    """Configure logging once when running app.py directly.
+
+    Override the level by exporting FITFINDR_LOG_LEVEL=DEBUG (or WARNING,
+    ERROR, etc.) before launching the app.
+    """
+    level = os.environ.get("FITFINDR_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)-5s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
 # ── query handler ─────────────────────────────────────────────────────────────
@@ -43,6 +62,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
            string and return it along with session["outfit_suggestion"] and
            session["fit_card"].
     """
+    logger.info("handle_query: query=%r wardrobe_choice=%r", user_query, wardrobe_choice)
     if not user_query or not user_query.strip():
         return "Please enter a search query to get started.", "", ""
 
@@ -55,8 +75,10 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     session = run_agent(query=user_query.strip(), wardrobe=wardrobe)
 
     if session["error"]:
+        logger.info("handle_query: returning error to UI")
         return f"⚠️ {session['error']}", "", ""
 
+    logger.info("handle_query: returning full result to UI")
     return (
         _format_listing(session["selected_item"]),
         session["outfit_suggestion"] or "",
@@ -152,5 +174,6 @@ Describe what you're looking for — include size and price if you want to filte
 
 
 if __name__ == "__main__":
+    _setup_logging()
     demo = build_interface()
     demo.launch()

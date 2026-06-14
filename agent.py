@@ -19,6 +19,7 @@ Usage (once implemented):
 """
 
 import json
+import logging
 
 from tools import (
     ToolError,
@@ -27,6 +28,8 @@ from tools import (
     search_listings,
     suggest_outfit,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -101,18 +104,24 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     of planning.md — your implementation should match what you described there.
     """
     session = _new_session(query, wardrobe)
+    logger.info("=== run_agent start: query=%r wardrobe_items=%d ===",
+                query, len(wardrobe.get("items", []) if isinstance(wardrobe, dict) else []))
 
     # Step 2: parse the natural-language query into structured search params.
+    logger.info("Step 2: parse query")
     try:
         session["parsed"] = _parse_query(query)
     except ToolError as e:
         session["error"] = f"Failed to parse user's request: {e}"
+        logger.error("Step 2 failed: %s", session["error"])
         return session
+    logger.info("Step 2: parsed=%s", session["parsed"])
 
     parsed = session["parsed"]
 
     # Step 3: search for matching listings. Retry once without the size
     # filter if the first call returns empty (per planning.md).
+    logger.info("Step 3: search_listings")
     try:
         results = search_listings(
             description=parsed["description"],
@@ -120,6 +129,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             max_price=parsed.get("max_price"),
         )
         if not results and parsed.get("size"):
+            logger.warning("Step 3: 0 results — retrying without size filter")
             results = search_listings(
                 description=parsed["description"],
                 size=None,
@@ -127,6 +137,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             )
     except ToolError as e:
         session["error"] = str(e)
+        logger.error("Step 3 failed: %s", e)
         return session
 
     session["search_results"] = results
@@ -141,19 +152,25 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             f"No listings found matching {', '.join(constraints)}. "
             "Try a different query or remove some constraints."
         )
+        logger.error("Step 3 failed: %s", session["error"])
         return session
 
     # Step 4: pick the top result.
     session["selected_item"] = results[0]
+    logger.info("Step 4: selected_item id=%s title=%r",
+                results[0]["id"], results[0]["title"])
 
     # Step 5: ask the LLM for an outfit using the new item + wardrobe.
+    logger.info("Step 5: suggest_outfit")
     try:
         session["outfit_suggestion"] = suggest_outfit(session["selected_item"], wardrobe)
     except ToolError as e:
         session["error"] = str(e)
+        logger.error("Step 5 failed: %s", e)
         return session
 
     # Step 6: turn the suggestion into a shareable caption.
+    logger.info("Step 6: create_fit_card")
     try:
         session["fit_card"] = create_fit_card(
             session["outfit_suggestion"],
@@ -161,8 +178,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         )
     except ToolError as e:
         session["error"] = str(e)
+        logger.error("Step 6 failed: %s", e)
         return session
 
+    logger.info("=== run_agent complete (success) ===")
     return session
 
 
@@ -205,17 +224,22 @@ def _parse_query(query: str) -> dict:
         )
         raw = resp.choices[0].message.content
     except Exception as e:
+        logger.error("parse_query: LLM call failed: %s", e)
         raise ToolError(f"parse_query LLM call failed: {e}") from e
 
     if not raw or not raw.strip():
+        logger.error("parse_query: LLM returned empty response")
         raise ToolError("parse_query LLM returned an empty response")
 
+    logger.debug("parse_query: raw LLM output=%r", raw)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as e:
+        logger.error("parse_query: non-JSON output: %r", raw)
         raise ToolError(f"parse_query LLM returned non-JSON output: {raw!r}") from e
 
     if not isinstance(parsed, dict) or not parsed.get("description"):
+        logger.error("parse_query: malformed result: %r", parsed)
         raise ToolError(f"parse_query LLM returned malformed result: {parsed!r}")
 
     return {
