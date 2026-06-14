@@ -75,6 +75,24 @@ class TestSearchListings:
         results = search_listings("tee", max_price=0.01)
         assert results == []
 
+    def test_bm25_ranks_rare_term_match_above_common_term_match(self):
+        """For 'black combat boots', the Suede Chelsea Boots (matches the
+        rare token 'boots') should outrank the Oversized Flannel Shirt
+        (matches only the common token 'black'). This is the whole point
+        of using BM25 — IDF weighting makes category-defining tokens beat
+        attribute tokens, without us hard-coding category semantics."""
+        results = search_listings("black combat boots")
+        ids = [r["id"] for r in results]
+        assert results, "expected at least one BM25 result"
+        assert ids[0] == "lst_028", (
+            f"expected Suede Chelsea Boots (lst_028) at the top, got {ids}"
+        )
+        # Flannel Shirt should not edge out items with rare-term matches.
+        if "lst_003" in ids:
+            assert ids.index("lst_028") < ids.index("lst_003"), (
+                "Chelsea Boots should rank above the Flannel Shirt"
+            )
+
     def test_raises_tool_error_when_dataset_missing(self, monkeypatch):
         """If the listings dataset can't be loaded, the tool raises ToolError
         so the agent loop can catch it and write to session['error']."""

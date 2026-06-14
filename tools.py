@@ -23,6 +23,7 @@ import re
 
 from dotenv import load_dotenv
 from groq import Groq
+from rank_bm25 import BM25Okapi
 
 from utils.data_loader import load_listings
 
@@ -111,49 +112,65 @@ def search_listings(
 
     total = len(listings)
 
-    if max_price is not None:
-        listings = [l for l in listings if l["price"] <= max_price]
-    if size:
-        listings = [l for l in listings if _size_matches(size, l["size"])]
-    logger.debug(
-        "search_listings: %d/%d listings after price+size filters",
-        len(listings), total,
-    )
-
     query_tokens = _tokenize(description)
     if not query_tokens:
-        logger.warning("search_listings: description tokenized to empty set; returning []")
+        logger.warning("search_listings: description tokenized to empty list; returning []")
         return []
 
-    scored = []
-    for listing in listings:
-        haystack = " ".join([
-            listing.get("title", ""),
-            listing.get("description", ""),
-            listing.get("category", ""),
-            " ".join(listing.get("style_tags", [])),
-        ])
-        listing_tokens = _tokenize(haystack)
-        score = len(query_tokens & listing_tokens)
-        if score > 0:
-            scored.append((score, listing))
+    # Pre-filter by price + size, but keep the original indices so BM25 can
+    # score against the FULL corpus (IDF reflects each token's global rarity).
+    candidate_idx = []
+    for i, l in enumerate(listings):
+        if max_price is not None and l["price"] > max_price:
+            continue
+        if size and not _size_matches(size, l["size"]):
+            continue
+        candidate_idx.append(i)
+    logger.debug(
+        "search_listings: %d/%d listings after price+size filters",
+        len(candidate_idx), total,
+    )
+    if not candidate_idx:
+        logger.info("search_listings: returning 0 result(s)")
+        return []
 
+    # Build BM25 over every listing's tokenized text so rare tokens
+    # (e.g. "boots") outweigh common ones (e.g. "black").
+    corpus_tokens = [_tokenize(_listing_text(l)) for l in listings]
+    bm25 = BM25Okapi(corpus_tokens)
+    all_scores = bm25.get_scores(query_tokens)
+
+    scored = [(all_scores[i], listings[i]) for i in candidate_idx if all_scores[i] > 0]
     scored.sort(key=lambda pair: pair[0], reverse=True)
     results = [listing for _, listing in scored[:3]]
+
     logger.info(
         "search_listings: returning %d result(s)%s",
         len(results),
-        " (top score=%d)" % scored[0][0] if scored else "",
+        " (top BM25=%.2f)" % scored[0][0] if scored else "",
     )
     if logger.isEnabledFor(logging.DEBUG):
         for score, listing in scored[:3]:
-            logger.debug("  · score=%d id=%s title=%r", score, listing["id"], listing["title"])
+            logger.debug("  · BM25=%.2f id=%s title=%r", score, listing["id"], listing["title"])
     return results
 
 
-def _tokenize(text: str) -> set[str]:
-    """Lowercase + extract word tokens, dropping common stopwords."""
-    return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS}
+def _tokenize(text: str) -> list[str]:
+    """Lowercase + extract word tokens, dropping common stopwords.
+
+    Returns a list with duplicates preserved so BM25 can use term frequency.
+    """
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS]
+
+
+def _listing_text(listing: dict) -> str:
+    """All searchable text from a listing concatenated for tokenization."""
+    return " ".join([
+        listing.get("title", ""),
+        listing.get("description", ""),
+        listing.get("category", ""),
+        " ".join(listing.get("style_tags", [])),
+    ])
 
 
 def _size_matches(requested: str, listing_size: str) -> bool:
