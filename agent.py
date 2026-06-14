@@ -18,7 +18,15 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+
+from tools import (
+    ToolError,
+    _get_groq_client,
+    create_fit_card,
+    search_listings,
+    suggest_outfit,
+)
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,10 +100,129 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: parse the natural-language query into structured search params.
+    try:
+        session["parsed"] = _parse_query(query)
+    except ToolError as e:
+        session["error"] = f"Failed to parse user's request: {e}"
+        return session
+
+    parsed = session["parsed"]
+
+    # Step 3: search for matching listings. Retry once without the size
+    # filter if the first call returns empty (per planning.md).
+    try:
+        results = search_listings(
+            description=parsed["description"],
+            size=parsed.get("size"),
+            max_price=parsed.get("max_price"),
+        )
+        if not results and parsed.get("size"):
+            results = search_listings(
+                description=parsed["description"],
+                size=None,
+                max_price=parsed.get("max_price"),
+            )
+    except ToolError as e:
+        session["error"] = str(e)
+        return session
+
+    session["search_results"] = results
+
+    if not results:
+        constraints = [f"'{parsed['description']}'"]
+        if parsed.get("size"):
+            constraints.append(f"size {parsed['size']}")
+        if parsed.get("max_price"):
+            constraints.append(f"under ${parsed['max_price']:.0f}")
+        session["error"] = (
+            f"No listings found matching {', '.join(constraints)}. "
+            "Try a different query or remove some constraints."
+        )
+        return session
+
+    # Step 4: pick the top result.
+    session["selected_item"] = results[0]
+
+    # Step 5: ask the LLM for an outfit using the new item + wardrobe.
+    try:
+        session["outfit_suggestion"] = suggest_outfit(session["selected_item"], wardrobe)
+    except ToolError as e:
+        session["error"] = str(e)
+        return session
+
+    # Step 6: turn the suggestion into a shareable caption.
+    try:
+        session["fit_card"] = create_fit_card(
+            session["outfit_suggestion"],
+            session["selected_item"],
+        )
+    except ToolError as e:
+        session["error"] = str(e)
+        return session
+
     return session
+
+
+# ── step 2 helper: query parsing ──────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """LLM-extract {description, size, max_price} from a natural-language query.
+
+    Returns a dict with `description` (non-empty str), `size` (str or None),
+    and `max_price` (float or None). Raises ToolError if the LLM call fails
+    or returns malformed / empty output.
+    """
+    user_prompt = (
+        "Extract structured search fields from this thrift-shopping request:\n\n"
+        f'"{query}"\n\n'
+        "Return ONLY a JSON object with these keys:\n"
+        '  - "description" (string, non-empty): brief item description to search\n'
+        '  - "size" (string or null): size if specified, else null\n'
+        '  - "max_price" (number or null): USD price ceiling if specified, else null\n\n'
+        'Example: {"description": "vintage graphic tee", "size": "M", "max_price": 30}\n'
+        "Output JSON only — no preamble, no markdown fences."
+    )
+
+    try:
+        client = _get_groq_client()
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract structured search parameters from "
+                        "natural-language thrift requests. Output only JSON."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content
+    except Exception as e:
+        raise ToolError(f"parse_query LLM call failed: {e}") from e
+
+    if not raw or not raw.strip():
+        raise ToolError("parse_query LLM returned an empty response")
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ToolError(f"parse_query LLM returned non-JSON output: {raw!r}") from e
+
+    if not isinstance(parsed, dict) or not parsed.get("description"):
+        raise ToolError(f"parse_query LLM returned malformed result: {parsed!r}")
+
+    return {
+        "description": str(parsed["description"]),
+        "size": parsed.get("size") or None,
+        "max_price": parsed.get("max_price"),
+    }
 
 
 # ── CLI test ──────────────────────────────────────────────────────────────────
