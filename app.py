@@ -78,8 +78,11 @@ def handle_query(
         return f"⚠️ {session['error']}", "", "", None, count_md
 
     logger.info("handle_query: returning full result to UI")
+    listing_text = _format_listing(session["selected_item"])
+    if session.get("search_note"):
+        listing_text = f"ℹ️ {session['search_note']}\n\n{listing_text}"
     return (
-        _format_listing(session["selected_item"]),
+        listing_text,
         session["outfit_suggestion"] or "",
         session["fit_card"] or "",
         session["selected_item"],

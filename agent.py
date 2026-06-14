@@ -53,6 +53,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
+        "search_note": None,         # user-facing note when filters were relaxed
         "error": None,               # set if the interaction ended early
     }
 
@@ -137,6 +138,11 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                     size=None,
                     max_price=parsed.get("max_price"),
                 )
+                if results:
+                    session["search_note"] = (
+                        f"No exact match for size {parsed['size']} — "
+                        "showing the closest result regardless of size."
+                    )
         except ToolError as e:
             session["error"] = str(e)
             logger.error("Step 3 failed: %s", e)
@@ -150,10 +156,10 @@ def run_agent(query: str, wardrobe: dict) -> dict:
                 constraints.append(f"size {parsed['size']}")
             if parsed.get("max_price"):
                 constraints.append(f"under ${parsed['max_price']:.0f}")
-            session["error"] = (
-                f"No listings found matching {', '.join(constraints)}. "
-                "Try a different query or remove some constraints."
-            )
+            msg = f"No listings found matching {', '.join(constraints)}."
+            if parsed.get("size"):
+                msg += " (Also tried without the size filter — still nothing matched.)"
+            session["error"] = msg + " Try a different query or remove some constraints."
             logger.error("Step 3 failed: %s", session["error"])
             return session
 
@@ -198,6 +204,8 @@ def _summarize_session(session: dict) -> str:
     parts = []
     if session.get("error"):
         parts.append(f"error={session['error']!r}")
+    if session.get("search_note"):
+        parts.append(f"search_note={session['search_note']!r}")
     if session.get("parsed"):
         parts.append(f"parsed={session['parsed']}")
     sr = session.get("search_results")
