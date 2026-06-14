@@ -73,8 +73,8 @@ A list containing 3 top matching listings, sorted by relevance, in the following
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if no listings match? -->
-It automatically retries with loosened constraints (e.g., remove size filter) and informs the user (e.g. set a log message in the session) what was adjusted.
-If the retry fails, then it should return an error response in the form of `{"error": "<error message>"}`.
+A no-match outcome is NOT an error — the tool returns an empty list `[]`. The agent loop is responsible for the retry: if it sees `[]`, it re-calls `search_listings` once with loosened constraints (e.g., drop the size filter). If the retry also returns `[]`, the agent sets a helpful message in `session['error']` and returns early.
+For unrecoverable failures (e.g., the listings dataset can't be loaded), the tool raises `ToolError`. The agent catches this and writes the message to `session['error']`.
 
 ---
 
@@ -91,12 +91,12 @@ This tool takes an item the current user is considering to thrift and their ward
 
 **What it returns:**
 <!-- Describe the return value -->
-It returns a non-empty string of a complete outfit styling suggestion based on the given item and the user's style profile based on the given wardrobe.
+A non-empty `str` of a complete outfit styling suggestion based on the given item and the user's style profile based on the given wardrobe.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
-If the wardrobe given is empty, it tries to guess the user's style from the user's query recorded in the session dict. If the query has no information about the user's style, either, or no outfit can be suggested, it can fall back to giving general styling advice.
-If the LLM fails or any unexpected error, it should return an error response in the form of `{"error": "<error message"}`.
+If the wardrobe given is empty, it tries to guess the user's style from the user's query recorded in the session dict. If the query has no information about the user's style, either, or no outfit can be suggested, it can fall back to giving general styling advice. (Empty wardrobe is NOT an error — the tool still returns a string.)
+If the LLM fails or any unexpected error, it raises `ToolError`. The agent loop catches this and writes the message to `session['error']`, then returns early without calling `create_fit_card` or `update_style_profile`.
 
 ---
 
@@ -117,8 +117,8 @@ A non-empty string of a shareable outfit description.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the outfit data is incomplete? -->
-The fit card content would just be more generic as the outfit suggestion is likely general styling advice.
-If the LLM fails or any unexpected error, it should return an error response in the form of `{"error": "<error message"}`.
+If `outfit` is non-empty but generic (e.g., general styling advice from the empty-wardrobe branch of `suggest_outfit`), the fit card content is allowed to be more generic — this is NOT an error.
+If `outfit` is empty/whitespace, `new_item` is missing required fields, or the LLM fails, the tool raises `ToolError`. The agent catches this and writes the message to `session['error']`.
 
 ---
 
@@ -172,7 +172,7 @@ The updated wardrobe JSON with the new item added. For example:
 ```
 
 **What happens if it fails or returns nothing:**
-If any unexpected error, it should return an error response in the form of `{"error": "<error message"}`.
+On any unexpected error (e.g., browser localStorage write failure, malformed `new_item`), the tool raises `ToolError`. The agent catches this and writes the message to `session['error']`. The interaction still returns the session — the user just won't have the item added to their wardrobe.
 
 ---
 
@@ -231,11 +231,16 @@ FitFindr stores and accesses state within a session using a `session` dict that 
 
 For each tool, describe the specific failure mode you're handling and what the agent does in response.
 
+All tools raise `ToolError` on unrecoverable failure. The agent loop wraps each tool call in `try/except ToolError`, writes the exception message to `session['error']`, and returns early (except for `update_style_profile` — its failure is non-fatal and the session still returns).
+
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | Automatically retry once and if still no results, set a helpful message in `session['error']` and return early |
-| suggest_outfit | Wardrobe is empty | Fetch the user's original query from `session['query']` as context and calls the LLM to generate styling advice with the given context |
-| create_fit_card | Outfit input is missing or incomplete | Pass the incomplete input to the tool call anyway and let its LLM generate content the best it can |
+| search_listings | No results match the query (NOT a ToolError — tool returns `[]`) | Re-call once with loosened constraints (e.g., drop size filter). If still `[]`, set `session['error']` and return early |
+| search_listings | Dataset cannot be loaded (raises `ToolError`) | Catch, write message to `session['error']`, return early |
+| suggest_outfit | Wardrobe is empty (NOT a ToolError — tool falls back to general advice) | None — proceed with the returned string |
+| suggest_outfit | LLM call fails (raises `ToolError`) | Catch, write message to `session['error']`, return early — skip `create_fit_card` and `update_style_profile` |
+| create_fit_card | Outfit is empty/whitespace, `new_item` malformed, or LLM fails (raises `ToolError`) | Catch, write message to `session['error']`, return early |
+| update_style_profile | localStorage write fails or `new_item` malformed (raises `ToolError`) | Catch, write message to `session['error']`, return the session anyway (the recommendation is already shown to the user) |
 
 ---
 
@@ -262,9 +267,10 @@ For each tool, describe the specific failure mode you're handling and what the a
 │          │                                                                      │
 │          │  ──► malformed / empty? ──► session['error']=msg, RETURN EARLY       │
 │          ▼                                                                      │
-│   (3) ╔══════════════════════════════════════════════════════════╗              │
-│       ║  TOOL: search_listings(description, size, max_price)     ║              │
-│       ╚══════════════════════════════════════════════════════════╝              │
+│   (3) try: ╔══════════════════════════════════════════════════════════╗         │
+│            ║  TOOL: search_listings(description, size, max_price)     ║         │
+│            ╚══════════════════════════════════════════════════════════╝         │
+│       except ToolError as e: session['error']=str(e), RETURN EARLY              │
 │          │ Session: session['search_results'] = [...]                           │
 │          │  ──► 0 results? ──► retry once without size filter                   │
 │          │                          │                                           │
@@ -273,27 +279,33 @@ For each tool, describe the specific failure mode you're handling and what the a
 │   (4) select top result                                                         │
 │          │ Session: session['selected_item'] = {...}                            │
 │          ▼                                                                      │
-│   (5) ╔══════════════════════════════════════════════════════════╗              │
-│       ║  TOOL: suggest_outfit(selected_item, wardrobe)           ║              │
-│       ╚══════════════════════════════════════════════════════════╝              │
-│          │  ──► wardrobe empty? ──► use session['query'] as style context       │
-│          │                                                                      │
-│          ▼ Session: session['outfit_suggestion'] = "..."                        │
-│   (6) ╔══════════════════════════════════════════════════════════╗              │
-│       ║  TOOL: create_fit_card(outfit_suggestion, selected_item) ║              │
-│       ╚══════════════════════════════════════════════════════════╝              │
-│          │ Session: session['fit_card'] = "..."                                 │
+│   (5) try: ╔══════════════════════════════════════════════════════════╗         │
+│            ║  TOOL: suggest_outfit(selected_item, wardrobe)           ║         │
+│            ╚══════════════════════════════════════════════════════════╝         │
+│       except ToolError as e:                                                    │
+│          │  (wardrobe empty? tool falls back to session['query'] as context)    │
+│          │  str returned → Session: session['outfit_suggestion'] = "..."        │
+│          │  ToolError    → Session: session['error']=str(e), RETURN EARLY       │
+│          ▼                                                                      │
+│   (6) try: ╔══════════════════════════════════════════════════════════╗         │
+│            ║  TOOL: create_fit_card(outfit_suggestion, selected_item) ║         │
+│            ╚══════════════════════════════════════════════════════════╝         │
+│       except ToolError as e:                                                    │
+│          │  str returned → Session: session['fit_card'] = "..."                 │
+│          │  ToolError    → Session: session['error']=str(e), RETURN EARLY       │
 │          ▼                                                                      │
 │   (7) answer user with: selected_item + outfit_suggestion + fit_card            │
 │          │                                                                      │
 │          ▼                                                                      │
 │       ask user: keep this item?                                                 │
 │          │                                                                      │
-│          ├──yes──► ╔══════════════════════════════════════════════╗             │
-│          │         ║  TOOL: update_style_profile(selected_item)   ║             │
-│          │         ║   ──► writes to browser localStorage         ║             │
-│          │         ╚══════════════════════════════════════════════╝             │
-│          │ Session: session['wardrobe'] (updated w/ new item)                   │
+│          ├──yes──► try: ╔══════════════════════════════════════════════╗        │
+│          │              ║  TOOL: update_style_profile(selected_item)   ║        │
+│          │              ║   ──► writes to browser localStorage         ║        │
+│          │              ╚══════════════════════════════════════════════╝        │
+│          │         except ToolError as e:                                       │
+│          │   updated wardrobe → Session: session['wardrobe'] (updated)          │
+│          │   ToolError        → Session: session['error']=str(e) (still return) │
 │          └──no───► (skip)                                                       │
 │          │                                                                      │
 │          ▼                                                                      │
