@@ -201,7 +201,7 @@ If still no results after the retry, set `session[error]` to a helpful message a
 4. Select the item to use (e.g., the top result). Store it in `session['selected_item']`.
 5. Call `suggest_outfit()` with the selected item and wardrobe. Store the result in `session['outfit_suggestion']`.
 6. Call `create_fit_card()` with the outfit suggestion and selected item. Store the result in `session['fit_card']`.
-7. Check with the user if they want to keep the selected item. If yes, call `update_style_profile()` to add the item to `session['wardrobe']` and update the user's locally stored wardrobe (in user browser).
+7. Answer the user with the recommended thrift item, outfit styling advice and the suggested fit card. Check with the user if they want to keep the selected item. If yes, call `update_style_profile()` to add the item to `session['wardrobe']` and update the user's locally stored wardrobe (in user browser).
 8. Return the session.
 
 ---
@@ -241,14 +241,73 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 ## Architecture
 
-<!-- Draw a diagram of your agent showing how the components connect:
-     User input → Planning Loop → Tools (search_listings, suggest_outfit, create_fit_card)
-                                                                          ↕
-                                                                   State / Session
-     Show what triggers each tool, how state flows between them, and where error paths branch off.
-     ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
-     sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
-     the planning loop and each individual tool. -->
+```
+┌──────────────────┐
+│   User Query     │
+│ "vintage tee…"   │
+└────────┬─────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              PLANNING LOOP                                      │
+│   (0) init session                                                              │
+│          │ Session: session['query'] = user_query                               │  
+│          ▼                                                                      │
+│   (1) load wardrobe ──► localStorage exists? ──yes──► load                      │
+│          │                              └──no───► get_empty_wardrobe()          │
+│          │                                                                      │
+│          ▼ Session: session['wardrobe'] = {my_wardrobe: {items: [...]}          │
+│   (2) parse query (LLM) ──► {description, size, max_price}                      │
+│          │ Session: session['parsed'] = {description, size, max_price}          │
+│          │                                                                      │
+│          │  ──► malformed / empty? ──► session['error']=msg, RETURN EARLY       │
+│          ▼                                                                      │
+│   (3) ╔══════════════════════════════════════════════════════════╗              │
+│       ║  TOOL: search_listings(description, size, max_price)     ║              │
+│       ╚══════════════════════════════════════════════════════════╝              │
+│          │ Session: session['search_results'] = [...]                           │
+│          │  ──► 0 results? ──► retry once without size filter                   │
+│          │                          │                                           │
+│          │                          └─► still 0? ──► session['error']=msg,      │
+│          ▼                                                 RETURN EARLY         │
+│   (4) select top result                                                         │
+│          │ Session: session['selected_item'] = {...}                            │
+│          ▼                                                                      │
+│   (5) ╔══════════════════════════════════════════════════════════╗              │
+│       ║  TOOL: suggest_outfit(selected_item, wardrobe)           ║              │
+│       ╚══════════════════════════════════════════════════════════╝              │
+│          │  ──► wardrobe empty? ──► use session['query'] as style context       │
+│          │                                                                      │
+│          ▼ Session: session['outfit_suggestion'] = "..."                        │
+│   (6) ╔══════════════════════════════════════════════════════════╗              │
+│       ║  TOOL: create_fit_card(outfit_suggestion, selected_item) ║              │
+│       ╚══════════════════════════════════════════════════════════╝              │
+│          │ Session: session['fit_card'] = "..."                                 │
+│          ▼                                                                      │
+│   (7) answer user with: selected_item + outfit_suggestion + fit_card            │
+│          │                                                                      │
+│          ▼                                                                      │
+│       ask user: keep this item?                                                 │
+│          │                                                                      │
+│          ├──yes──► ╔══════════════════════════════════════════════╗             │
+│          │         ║  TOOL: update_style_profile(selected_item)   ║             │
+│          │         ║   ──► writes to browser localStorage         ║             │
+│          │         ╚══════════════════════════════════════════════╝             │
+│          │ Session: session['wardrobe'] (updated w/ new item)                   │
+│          └──no───► (skip)                                                       │
+│          │                                                                      │
+│          ▼                                                                      │
+│   (8) return session                                                            │
+│                                                                                 │
+└────────────────────────────────┬────────────────────────────────────────────────┘
+                                 │  (every step reads + writes)
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              SESSION DICT                                       │
+│   query  ·  parsed  ·  wardrobe  ·  search_results  ·  selected_item            │
+│   outfit_suggestion  ·  fit_card  ·  error                                      │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -267,7 +326,19 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 **Milestone 3 — Individual tool implementations:**
 
+- **`search_listings`** — I'll give Claude the Tool 1 block from planning.md (inputs, return shape, failure mode) and ask it to implement the function using `load_listings()` from the data loader. Before running it, I'll check that the generated code filters by all three parameters, sorts by relevance, returns at most 3 results, and handles the no-match case by returning `{"error": ...}`. Then I'll test it with 3 queries: a normal match, a too-strict filter that should return empty, and a missing-size query.
+
+- **`suggest_outfit`** — I'll give Claude the Tool 2 block plus `get_example_wardrobe()` from `utils/data_loader.py` so it knows the wardrobe shape it'll receive. I'll ask it to write the LLM prompt itself (embedding the new item + every item in `wardrobe['items']`) along with the call wrapper. Before trusting it, I'll check that the prompt actually references each wardrobe item by name and that the empty-wardrobe branch falls back to `session['query']` for style context. To test, I'll run it once with `get_example_wardrobe()` to verify the suggestion references real wardrobe items, and once with `get_empty_wardrobe()` to confirm it returns generic styling advice from the query rather than erroring out.
+
+- **`create_fit_card`** — I'll give Claude the Tool 3 block plus the final-output example from "A Complete Interaction" (the "thrifted this faded band tee…" string) so it has a tone reference. I'll check that the function accepts a string outfit + item dict and returns a plain string (not a dict), and that the prompt instructs the LLM to produce something shareable / first-person. Test with the band-tee example from planning.md plus one generic-advice case.
+
+- **`update_style_profile`** — I'll give Claude the Tool 4 block plus `./data/wardrobe_schema.json`. I'll check that the generated code (a) reads from browser localStorage, (b) creates a new wardrobe via `get_empty_wardrobe()` if none exists, (c) appends the new item in schema-conformant form (id, name, category, colors, style_tags, notes), and (d) writes back to localStorage. Test by adding one item to an empty wardrobe and a second item to that result.
+
+- **`parse_query` (helper for step 2)** — Not in the Tools section, but it's an LLM call I still need. I'll give Claude planning loop step 2 (the parsed-dict example) and ask for a function that takes the raw query and returns `{description, size, max_price}` or sets `session['error']`. Verify the JSON parsing handles malformed LLM output (extra prose, missing fields) and that I get the early-return path on garbage input. Test with the example query, a query missing price, and a non-fit-finding query.
+
 **Milestone 4 — Planning loop and state management:**
+
+- I'll give Claude the **Planning Loop**, **State Management**, and **Architecture** sections together — the diagram is the canonical reference for control flow, the loop section has the step-by-step prose, and the state section pins down the session dict shape. I'll ask for a single `run_agent(user_query)` function that orchestrates steps 0–8. Before testing, I'll check: (a) the session dict has exactly the 8 keys listed in State Management, (b) every step writes to its session key per the diagram annotations, (c) the three early-return points (parse error, search empty after retry, no further steps) all set `session['error']` and exit cleanly without calling downstream tools, and (d) the `update_style_profile` call is gated on the user's keep-item answer. Then I'll run the full example interaction from the bottom of planning.md end-to-end, plus a 0-results case and a malformed-query case to exercise both error branches.
 
 ---
 
