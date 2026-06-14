@@ -118,11 +118,9 @@ Two layers:
 
 What changed between `planning.md` and the final code:
 
-- **Tool 4 signature.** Planning had `update_style_profile(new_item)` doing both the transform AND localStorage I/O. Final tool is pure `update_style_profile(new_item, wardrobe) → wardrobe`; the Gradio handler owns persistence via `gr.BrowserState`. Easier to test, separates concerns.
-- **Error returns → exceptions.** Planning originally specified tools return `{"error": "..."}` dicts on failure. Final convention is `raise ToolError`; agent loop catches and writes to `session['error']`. Cleaner signatures (one return shape per tool), errors explicit at the call site.
-- **Empty-outfit on `create_fit_card`.** Originally specced as a `ToolError` like the others; dropped to a graceful placeholder string — the fit card is non-critical, so it shouldn't fail the whole interaction.
-- **Search relevance scoring.** Started as token-overlap counting (what the planning TODO suggested), then swapped to BM25 after a real query (`"black combat boots size 8"`) surfaced an Oversized Flannel Shirt instead of the Suede Chelsea Boots.
-- **Step 1 wardrobe load.** Planning step 1 had the agent load the wardrobe from browser storage. Final design: `run_agent` takes `wardrobe` as a parameter; the Gradio handler owns the read-from-BrowserState step. Keeps the agent UI-agnostic.
+- **Error returns → exceptions.** I originally planned for tools to return `{"error": "..."}` dicts on failure. After talking through the tradeoffs with the AI, I shifted to `raise ToolError`; the agent loop catches and writes to `session['error']`. Cleaner — one return shape per tool, errors explicit at the call site instead of a union return type.
+- **Search relevance scoring.** Started with the token-overlap counter the planning TODO suggested, but a real query (`"black combat boots size 8"`) surfaced an Oversized Flannel Shirt instead of the Suede Chelsea Boots — overlap matching treated every token equally, so a single match on the common word `black` outranked items matching the rare word `boots`. Swapped in BM25 (`rank_bm25`) so IDF weighting naturally makes category-defining tokens beat attribute tokens, without hard-coding category semantics.
+- **Wardrobe persistence (stretch feature) added after review.** The original planning loop step 7 had the agent ask "keep this item?" and call `update_style_profile` to save to browser localStorage — but the initial agent implementation skipped step 7 entirely (Gradio's single-shot `handle_query` doesn't model multi-turn). A review caught that nothing was actually being persisted. Fix: rewrote `update_style_profile` as a pure `(new_item, wardrobe) → wardrobe` function, added a "➕ Keep this item" button to the UI, and wired `gr.BrowserState(storage_key="fitfindr_wardrobe")` to handle the persistence layer — splitting the work cleanly between the tool (transform) and the Gradio handler (storage).
 
 ## AI Usage
 
