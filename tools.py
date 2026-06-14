@@ -179,8 +179,89 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    items = wardrobe.get("items", []) if isinstance(wardrobe, dict) else []
+    item_summary = _format_new_item(new_item)
+
+    if items:
+        wardrobe_summary = _format_wardrobe_items(items)
+        user_prompt = (
+            f"A user is considering thrifting this item:\n{item_summary}\n\n"
+            f"Their existing wardrobe:\n{wardrobe_summary}\n\n"
+            "Suggest 1–2 complete outfit combinations using the thrifted item "
+            "paired with SPECIFIC named pieces from their wardrobe above. "
+            "Name the wardrobe pieces explicitly (e.g., \"pair with your "
+            "Baggy straight-leg jeans and Chunky white sneakers\"). "
+            "Add one short sentence describing the vibe. "
+            "Keep the whole reply under 120 words. No preamble, no bullet markers."
+        )
+    else:
+        user_prompt = (
+            f"A user is considering thrifting this item:\n{item_summary}\n\n"
+            "They haven't shared their existing wardrobe. Suggest one complete "
+            "outfit by describing the TYPES of pieces that would pair well "
+            "(e.g., \"high-waisted dark-wash jeans\", \"chunky black boots\"). "
+            "Add one short sentence describing the vibe. "
+            "Keep the whole reply under 120 words. No preamble, no bullet markers."
+        )
+
+    try:
+        client = _get_groq_client()
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a thoughtful thrift styling assistant. "
+                        "Give specific, actionable outfit suggestions in a "
+                        "casual, confident voice."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+        )
+        suggestion = resp.choices[0].message.content
+    except Exception as e:
+        raise ToolError(f"suggest_outfit LLM call failed: {e}") from e
+
+    if not suggestion or not suggestion.strip():
+        raise ToolError("suggest_outfit LLM returned an empty response")
+
+    return suggestion.strip()
+
+
+def _format_new_item(item: dict) -> str:
+    """Render a listing dict as a compact bullet block for the LLM prompt."""
+    if not isinstance(item, dict) or not item:
+        return "(no item details provided)"
+    parts = [f"- {item.get('title', 'Untitled item')}"]
+    if item.get("category"):
+        parts.append(f"  category: {item['category']}")
+    if item.get("colors"):
+        parts.append(f"  colors: {', '.join(item['colors'])}")
+    if item.get("style_tags"):
+        parts.append(f"  style tags: {', '.join(item['style_tags'])}")
+    if item.get("description"):
+        parts.append(f"  details: {item['description']}")
+    return "\n".join(parts)
+
+
+def _format_wardrobe_items(items: list[dict]) -> str:
+    """Render the wardrobe item list so each piece is named explicitly in the prompt."""
+    lines = []
+    for it in items:
+        name = it.get("name", "(unnamed item)")
+        cat = it.get("category", "?")
+        bits = [f"- {name} ({cat})"]
+        if it.get("colors"):
+            bits.append(f"colors: {', '.join(it['colors'])}")
+        if it.get("style_tags"):
+            bits.append(f"style: {', '.join(it['style_tags'])}")
+        if it.get("notes"):
+            bits.append(f"notes: {it['notes']}")
+        lines.append("; ".join(bits))
+    return "\n".join(lines)
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
